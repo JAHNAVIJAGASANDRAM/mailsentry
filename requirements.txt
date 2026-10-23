@@ -4,3 +4,9 @@ google-api-python-client>=2.0.0
 google-auth>=2.0.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.0.0
+
+# Independent SPF, DKIM, and DMARC verification (DNS is used only with --verify-auth).
+spf3>=2.0.17
+dkimpy>=1.1.8
+dnspython>=2.6.0
+checkdmarc>=6.0.2

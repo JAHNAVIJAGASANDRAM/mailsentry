@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from auth_verification import SMTPAuthContext, verify_message_authentication
+
 
 RISKY_EXTENSIONS = {
     ".bat", ".cmd", ".com", ".exe", ".iso", ".jar", ".js", ".jse",
@@ -38,8 +40,8 @@ EXPLANATIONS = {
     "reply_to_mismatch": "The Reply-To address differs from the sender address.",
     "raw_ip_url": "A message URL uses an IP address instead of a domain name.",
     "risky_attachment": "An attachment uses a file extension commonly used for executable content.",
-    "dmarc_fail": "The message reports a failed DMARC authentication result.",
-    "spf_fail": "The message reports a failed SPF authentication result.",
+    "dmarc_fail": "Independent DMARC evaluation found no aligned SPF or DKIM pass under the sender domain's policy.",
+    "spf_fail": "Independent SPF evaluation found that the trusted SMTP client was not authorized by the envelope sender's policy.",
 }
 RULE_LABELS = {
     "reply_to_mismatch": "Reply-To mismatch",
@@ -141,13 +143,26 @@ def score_findings(findings: list[dict[str, str]]) -> tuple[int, str, list[str]]
     return score, risk, recommendations
 
 
-def build_report(parsed: dict[str, Any]) -> dict[str, Any]:
+def build_report(
+    parsed: dict[str, Any],
+    *,
+    verify_auth: bool = False,
+    raw_message: bytes | None = None,
+    smtp_context: SMTPAuthContext | None = None,
+) -> dict[str, Any]:
     findings = detect_content(parsed)
     authentication = parse_authentication(parsed["headers"])
-    if authentication["dmarc"] == "fail":
-        findings.append({"rule": "dmarc_fail", "evidence": "DMARC result: fail"})
-    if authentication["spf"] == "fail":
-        findings.append({"rule": "spf_fail", "evidence": "SPF result: fail"})
+    verification = (
+        verify_message_authentication(parsed["headers"], raw_message, smtp_context)
+        if verify_auth else {
+            method: {"status": "NOT_EVALUATED", "reason": "Independent authentication verification was not requested."}
+            for method in ("spf", "dkim", "dmarc")
+        }
+    )
+    if verification["dmarc"]["status"] == "FAIL":
+        findings.append({"rule": "dmarc_fail", "evidence": "Independent DMARC result: fail"})
+    if verification["spf"]["status"] == "FAIL":
+        findings.append({"rule": "spf_fail", "evidence": "Independent SPF result: fail"})
     score, risk, recommendations = score_findings(findings)
     return {
         "findings": [
@@ -156,6 +171,7 @@ def build_report(parsed: dict[str, Any]) -> dict[str, Any]:
             for finding in findings
         ],
         "authentication": authentication,
+        "verification": verification,
         "score": score,
         "risk_level": risk,
         "recommendations": recommendations,
@@ -187,6 +203,12 @@ def authentication_label(status: str) -> str:
     return f"Result: {status}"
 
 
+def verification_label(result: dict[str, Any]) -> str:
+    status = result.get("status", "NOT_EVALUATED")
+    reason = result.get("reason", "")
+    return f"{status}: {reason}" if reason else status
+
+
 def render_markdown_report(report: dict[str, Any], email_filename: str) -> str:
     """Render a privacy-safe human-readable Markdown analyst report."""
     lines = [
@@ -200,9 +222,15 @@ def render_markdown_report(report: dict[str, Any], email_filename: str) -> str:
         "",
         "## Authentication",
         "",
+        "These header values are reported as received. They are not trusted proof and do not affect the score.",
+        "",
     ]
     for method, status in report["authentication"].items():
         lines.append(f"- **{method.upper()}:** {escape_markdown(authentication_label(status))}")
+
+    lines.extend(["", "## Independent verification", ""])
+    for method, result in report["verification"].items():
+        lines.append(f"- **{method.upper()}:** {escape_markdown(verification_label(result))}")
 
     lines.extend(["", "## Findings", ""])
     if report["findings"]:
@@ -238,9 +266,12 @@ def print_terminal_report(report: dict[str, Any], email_filename: str) -> None:
     print(f"Email file: {email_filename}")
     print(f"Risk level: {report['risk_level']} ({report['score']} points)")
     print("Note: This is a heuristic score, not a probability of compromise.")
-    print("\nAuthentication:")
+    print("\nAuthentication-Results headers (reported, untrusted):")
     for method, status in report["authentication"].items():
         print(f"  {method.upper()}: {authentication_label(status)}")
+    print("\nIndependent verification:")
+    for method, result in report["verification"].items():
+        print(f"  {method.upper()}: {verification_label(result)}")
     print("\nFindings:")
     if report["findings"]:
         for index, finding in enumerate(report["findings"], start=1):
@@ -262,9 +293,12 @@ def main() -> None:
     parser.add_argument("eml", help="Path to a .eml file")
     parser.add_argument("--json", dest="json_path", help="Write findings and risk summary to this JSON file")
     parser.add_argument("--report", dest="report_path", help="Write a human-readable Markdown report")
+    parser.add_argument("--verify-auth", action="store_true",
+                        help="Independently verify DKIM/DMARC using bounded DNS lookups; SPF needs trusted SMTP inputs")
     args = parser.parse_args()
     parsed = parse_eml(args.eml)
-    result = build_report(parsed)
+    raw_message = Path(args.eml).read_bytes() if args.verify_auth else None
+    result = build_report(parsed, verify_auth=args.verify_auth, raw_message=raw_message)
     print_terminal_report(result, parsed["source"])
     if args.json_path:
         write_output(args.json_path, json.dumps(result, indent=2) + "\n", "JSON report", parser)

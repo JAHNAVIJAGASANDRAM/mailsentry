@@ -226,6 +226,7 @@ class GmailWorker:
         batch_size: int = 100,
         max_attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
+        verify_auth: bool = False,
     ):
         if polling_interval < 1 or max_pages < 1 or not 1 <= page_size <= 500 or batch_size < 1:
             raise ValueError("Polling and request limits must be positive; page_size must be 1..500.")
@@ -238,6 +239,7 @@ class GmailWorker:
         self.batch_size = batch_size
         self.max_attempts = max_attempts
         self.sleep = sleep
+        self.verify_auth = verify_auth
         self.label_ids: dict[str, str] = {}
         self._initial_checkpoint = False
         self._cycle_failures = 0
@@ -374,7 +376,7 @@ class GmailWorker:
                 padded = encoded + "=" * (-len(encoded) % 4)
                 message_bytes = base64.b64decode(padded, altchars=b"-_", validate=True)
                 parsed = parse_eml_bytes(message_bytes, "Gmail message")
-                report = build_report(parsed)
+                report = build_report(parsed, verify_auth=self.verify_auth, raw_message=message_bytes)
             except (ValueError, binascii.Error, LookupError, UnicodeError, TypeError):
                 self.state.fail(message_id, "malformed_message")
                 LOGGER.warning("A malformed Gmail message could not be analyzed; processing skipped.")
@@ -460,6 +462,8 @@ def main() -> int:
     parser.add_argument("--state", default="state/mailsentry.sqlite3", help="SQLite ID/status state file")
     parser.add_argument("--reports", default="reports/gmail", help="Directory for privacy-safe reports")
     parser.add_argument("--once", action="store_true", help="Run one poll cycle and exit")
+    parser.add_argument("--verify-auth", action="store_true",
+                        help="Independently verify DKIM/DMARC using bounded DNS lookups")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", stream=sys.stderr, force=True)
     if args.interval < 1:
@@ -471,7 +475,7 @@ def main() -> int:
         parser.exit(2, f"MailSentry: {error}\n")
     try:
         with StateStore(args.state) as state:
-            worker = GmailWorker(service, state, args.reports, args.interval)
+            worker = GmailWorker(service, state, args.reports, args.interval, verify_auth=args.verify_auth)
             if args.once:
                 try:
                     result = worker.poll_once()

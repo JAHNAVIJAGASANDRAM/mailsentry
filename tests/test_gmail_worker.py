@@ -432,6 +432,26 @@ class GmailWorkerTests(unittest.TestCase):
             self.assertEqual(len(service.user_resource.message_resource.modified), 1)
             state.close()
 
+    def test_verify_auth_option_passes_original_mime_to_independent_verifier(self):
+        raw = {"message-id": (ROOT / "samples" / "benign.eml").read_bytes()}
+        service = FakeService(raw)
+        verification = {
+            "spf": {"status": "NOT_EVALUATED", "reason": "SMTP inputs unavailable"},
+            "dkim": {"status": "PASS", "reason": "signature verified", "signatures": []},
+            "dmarc": {"status": "PASS", "reason": "aligned DKIM pass", "aligned": True, "policy": "reject"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite3")
+            state.queue(["message-id"])
+            worker = GmailWorker(service, state, Path(directory) / "reports", verify_auth=True)
+            worker.ensure_labels()
+            with patch("mailsentry.verify_message_authentication", return_value=verification) as verifier:
+                self.assertEqual(worker.process_pending(), 1)
+            self.assertEqual(verifier.call_args.args[1], raw["message-id"])
+            reports = list((Path(directory) / "reports").glob("*.json"))
+            self.assertEqual(json.loads(reports[0].read_text(encoding="utf-8"))["verification"]["dkim"]["status"], "PASS")
+            state.close()
+
 
 if __name__ == "__main__":
     unittest.main()

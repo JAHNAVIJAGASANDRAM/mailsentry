@@ -1,6 +1,6 @@
 # MailSentry
 
-MailSentry is an offline `.eml` analyzer and an optional post-delivery Gmail triage worker. It uses Python 3.10+ and the standard library for analysis. Gmail integration is opt-in, uses Google's official API libraries, and requests only `https://www.googleapis.com/auth/gmail.modify`.
+MailSentry is a local `.eml` analyzer and an optional post-delivery Gmail triage worker. Core parsing and content checks use Python 3.10+ and the standard library. Independent SPF, DKIM, and DMARC checks are opt-in and use DNS; Gmail integration is also opt-in, uses Google's official API libraries, and requests only `https://www.googleapis.com/auth/gmail.modify`.
 
 MailSentry is post-delivery mailbox triage, not an email gateway or a replacement for Gmail spam filtering. It does not send, delete, move, quarantine, or mark messages as read. It does not follow URLs or execute/open attachments. Live inbox integration is not enabled by the offline CLI.
 
@@ -14,7 +14,15 @@ python .\mailsentry.py .\samples\suspicious.eml --json .\reports\suspicious.json
 python -m unittest discover -s tests
 ```
 
-Terminal, JSON, and Markdown reports are generated from the same analysis. JSON and Markdown omit the message body, headers, addresses, raw URLs, and attachment filenames. Markdown includes the input filename. Scores are rule-based heuristics, not probabilities of compromise. Missing SPF, DKIM, or DMARC results are reported as unavailable, not failed.
+Terminal, JSON, and Markdown reports are generated from the same analysis. JSON and Markdown omit the message body, headers, addresses, raw URLs, and attachment filenames. Markdown includes the input filename. Scores are rule-based heuristics, not probabilities of compromise. `Authentication-Results` values are shown as untrusted reported headers and never prove authentication or affect scoring. Independent checks are not run by default.
+
+Run independent DKIM and DMARC checks with bounded DNS requests:
+
+```powershell
+python .\mailsentry.py .\samples\suspicious.eml --verify-auth --json .\reports\verified.json --report .\reports\verified.md
+```
+
+The verifier checks DKIM signatures against DNS public keys, looks up and parses the applicable DMARC policy, and evaluates SPF/DKIM alignment. Imported `.eml` files and Gmail API messages do not contain trusted SMTP transaction data, so SPF is reported as `NOT_EVALUATED`; MailSentry never infers the connecting IP, envelope sender, or HELO identity from message headers. A future trusted receiving-MTA integration can pass those values through the `SMTPAuthContext` interface. DMARC is only reported as a failure when policy and available independent checks establish that no aligned identifier passed; absent SMTP inputs or temporary DNS errors remain not evaluated/temporary.
 
 ## Rules and scoring
 
@@ -25,10 +33,10 @@ Each rule contributes at most once per message:
 | Reply-To differs from From | +2 |
 | URL host is a raw IPv4 or IPv6 address | +2 |
 | Risky attachment extension (`.bat`, `.cmd`, `.com`, `.exe`, `.iso`, `.jar`, `.js`, `.jse`, `.lnk`, `.msi`, `.ps1`, `.scr`, `.vbe`, `.vbs`) | +3 |
-| DMARC result is `fail` | +2 |
-| SPF result is `fail` | +1 |
+| Independently verified DMARC result is `FAIL` | +2 |
+| Independently verified SPF result is `FAIL` | +1 |
 
-Risk bands are Low (0–1), Medium (2–3), and High (4+). DKIM is reported but does not add points.
+Risk bands are Low (0–1), Medium (2–3), and High (4+). DKIM is reported but does not add points. Each rule is counted once. Reported header failures alone never contribute points.
 
 ## Optional Gmail worker
 
@@ -59,6 +67,12 @@ Run one poll cycle, useful for checking setup:
 python .\gmail_worker.py --once
 ```
 
+Enable independent DKIM and DMARC checks for newly processed Gmail messages (DNS is queried with bounded timeouts; SPF still needs trusted SMTP inputs that Gmail API does not provide):
+
+```powershell
+python .\gmail_worker.py --once --verify-auth
+```
+
 The one-shot command prints a privacy-safe summary with discovered, queued, processed, failed, and retry counts plus the report directory. An empty first run saves the initial checkpoint and reports that future Inbox arrivals will be monitored; it does not scan older mail. Configuration and authorization failures exit nonzero with a setup hint. Unexpected internal errors are reported by type only, and the message remains resumable.
 
 Choose a different interval in seconds, then stop with `Ctrl+C`:
@@ -73,10 +87,25 @@ The worker creates and applies one of `MailSentry/Low`, `MailSentry/Medium`, or 
 
 ### Privacy and operational notes
 
-- Message content is fetched only for newly observed Inbox additions and held in memory for analysis. It is not written to SQLite or logs.
+- Message content is fetched only for newly observed Inbox additions and held in memory for analysis. It is not written to SQLite or logs. With `--verify-auth`, MailSentry makes DNS TXT lookups for DKIM keys and DMARC policy only; it does not open message URLs or contact mail servers.
 - SQLite stores the Gmail message ID, status, attempt count, sanitized error code, and sync checkpoint so work can be deduplicated and resumed. OAuth credentials and tokens remain local.
 - Reports use a hashed message identifier for filenames and omit message body, sender/recipient addresses, raw URLs, attachment filenames, and raw finding evidence.
 - Generated reports, local OAuth files, SQLite state, and Python caches are ignored by Git. Review report storage and access on your machine because even sanitized risk results are operationally sensitive.
 - Gmail modify scope permits reading messages and changing labels. The worker uses it to read new Inbox messages and add only its risk labels.
 
 Troubleshooting: confirm the Gmail API is enabled, `credentials.json` is a Desktop app client, the authorizing account is listed as an OAuth test user, and the browser consent grants Gmail modify access. For revoked authorization, stop the worker, remove local `token.json`, and restart to authorize again. A 401/403 stops the worker rather than retrying indefinitely; transient rate-limit/server errors use bounded retries and resume on a later poll.
+
+## Authentication verification behavior and limits
+
+- `--verify-auth` requires `spf3`, `dkimpy`, `dnspython`, and `checkdmarc`, installed by `python -m pip install -r requirements.txt`. These maintained libraries provide SPF evaluation, DKIM signature verification, bounded TXT resolution, and DMARC policy discovery/parsing.
+- SPF supports PASS, FAIL, SOFTFAIL, NEUTRAL, NONE, TEMPERROR, and PERMERROR from the SPF engine. It runs only with a trusted SMTP context containing the actual client IP, MAIL FROM envelope sender, and HELO identity. No such context is available from a standalone `.eml` or Gmail API message, so MailSentry reports `NOT_EVALUATED` instead of guessing.
+- DKIM distinguishes no signature (`NONE`), invalid signatures, missing public keys, temporary DNS errors, and verified signatures. Multiple signatures are checked up to a fixed limit. DKIM verification follows dkimpy's supported algorithms and message-format limitations.
+- DMARC uses checkdmarc's applicable-policy lookup and parser, including organizational-domain policy discovery. PASS requires a valid DMARC policy and at least one passing aligned DKIM or SPF identity. A policy record by itself is never a pass or fail. When SPF is unavailable and no aligned DKIM signature passes, DMARC remains `NOT_EVALUATED` rather than inferring SPF failure.
+- DNS queries use a 2-second per-query timeout; SPF has an 8-second total query budget and the DNS-backed library limits SPF mechanisms to the protocol's lookup limit. Offline or temporary DNS errors are reported without treating them as authentication failures. Normal unit tests mock these lookups and do not require live DNS.
+- Authentication failures are indicators, not proof that a message is malicious. DMARC/SPF scoring uses only independent verification results. Untrusted `Authentication-Results` values remain visible as reported metadata and are not scored.
+
+Run the full standard-library test suite (all DNS and library outcomes are mocked):
+
+```powershell
+python -m unittest discover -s tests -v
+```

@@ -1,9 +1,12 @@
 import json
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from mailsentry import (
     build_report,
@@ -32,14 +35,46 @@ class MailSentryTests(unittest.TestCase):
         self.assertIn("Unavailable", markdown)
         self.assertIn("not counted as a failure", markdown)
 
-    def test_suspicious_sample_finds_content_and_auth_rules(self):
+    def test_reported_authentication_headers_do_not_count_as_verified_failures(self):
         report = build_report(parse_eml(ROOT / "samples" / "suspicious.eml"))
         rules = {finding["rule"] for finding in report["findings"]}
-        self.assertEqual(rules, {
-            "reply_to_mismatch", "raw_ip_url", "risky_attachment", "dmarc_fail", "spf_fail",
-        })
+        self.assertEqual(rules, {"reply_to_mismatch", "raw_ip_url", "risky_attachment"})
         self.assertEqual(report["authentication"], {"spf": "fail", "dkim": "pass", "dmarc": "fail"})
+        self.assertTrue(all(item["status"] == "NOT_EVALUATED" for item in report["verification"].values()))
+        self.assertEqual((report["score"], report["risk_level"]), (7, "High"))
+
+    def test_independent_authentication_failures_are_scored_once(self):
+        parsed = parse_eml(ROOT / "samples" / "suspicious.eml")
+        verification = {
+            "spf": {"status": "FAIL", "reason": "independent SPF check"},
+            "dkim": {"status": "INVALID", "reason": "bad signature"},
+            "dmarc": {"status": "FAIL", "reason": "no aligned pass"},
+        }
+        with patch("mailsentry.verify_message_authentication", return_value=verification):
+            report = build_report(parsed, verify_auth=True, raw_message=b"message")
+        rules = [finding["rule"] for finding in report["findings"]]
+        self.assertEqual(rules.count("spf_fail"), 1)
+        self.assertEqual(rules.count("dmarc_fail"), 1)
         self.assertEqual((report["score"], report["risk_level"]), (10, "High"))
+
+    def test_cli_opt_in_uses_independent_results_for_reports(self):
+        verification = {
+            "spf": {"status": "NOT_EVALUATED", "reason": "trusted inputs unavailable"},
+            "dkim": {"status": "PASS", "reason": "signature verified", "signatures": []},
+            "dmarc": {"status": "PASS", "reason": "aligned DKIM pass", "aligned": True, "policy": "reject"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            json_path = Path(directory) / "report.json"
+            argv = ["mailsentry.py", str(ROOT / "samples" / "benign.eml"), "--verify-auth", "--json", str(json_path)]
+            with patch("sys.argv", argv), patch("mailsentry.verify_message_authentication", return_value=verification) as verifier, \
+                    redirect_stdout(io.StringIO()):
+                from mailsentry import main
+                main()
+            exported = json.loads(json_path.read_text(encoding="utf-8"))
+        self.assertEqual(exported["verification"]["dkim"]["status"], "PASS")
+        self.assertNotIn("domain", exported["verification"]["dkim"])
+        self.assertNotIn("example.org", json.dumps(exported))
+        self.assertEqual(verifier.call_args.args[1], (ROOT / "samples" / "benign.eml").read_bytes())
 
     def test_scoring_bands_and_deduplicates_rules(self):
         repeated = [
@@ -140,6 +175,8 @@ class MailSentryTests(unittest.TestCase):
             markdown = markdown_path.read_text(encoding="utf-8")
         self.assertEqual(data["risk_level"], "High")
         self.assertIn("Authentication", markdown)
+        self.assertIn("Independent verification", markdown)
+        self.assertIn("reported as received", markdown)
         self.assertIn("Findings", markdown)
         self.assertIn("Recommended actions", markdown)
         self.assertIn("+3 points", markdown)
