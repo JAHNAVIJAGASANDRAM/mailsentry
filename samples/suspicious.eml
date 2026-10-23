@@ -2,6 +2,8 @@ From: Finance Team <payroll@example.org>
 Reply-To: account-update@external.example
 To: Employee <employee@example.net>
 Subject: Urgent payroll review
+Authentication-Results: mx.example.net; spf=fail smtp.mailfrom=example.org;
+ dkim=pass header.d=example.org; dmarc=fail header.from=example.org
 MIME-Version: 1.0
 Content-Type: multipart/mixed; boundary="mail-sentry-boundary"
 

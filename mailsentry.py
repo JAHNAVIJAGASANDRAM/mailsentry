@@ -19,6 +19,7 @@ RISKY_EXTENSIONS = {
     ".lnk", ".msi", ".ps1", ".scr", ".vbe", ".vbs",
 }
 URL_PATTERN = re.compile(r"\b(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
+AUTH_RESULT_PATTERN = re.compile(r"(?:^|;)\s*(spf|dkim|dmarc)\s*=\s*([a-z]+)", re.IGNORECASE)
 
 
 def parse_eml(path: str | Path) -> dict[str, Any]:
@@ -76,6 +77,15 @@ def detect_content(parsed: dict[str, Any]) -> list[dict[str, str]]:
     return findings
 
 
+def parse_authentication(headers: dict[str, str]) -> dict[str, str]:
+    """Read SPF, DKIM, and DMARC outcomes from Authentication-Results headers."""
+    results = {method: "unavailable" for method in ("spf", "dkim", "dmarc")}
+    for header in headers.get("authentication-results", "").splitlines():
+        for method, status in AUTH_RESULT_PATTERN.findall(header):
+            results[method.lower()] = status.lower()
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze an email message offline.")
     parser.add_argument("eml", help="Path to a .eml file")
@@ -83,6 +93,7 @@ def main() -> None:
     args = parser.parse_args()
     result = parse_eml(args.eml)
     result["findings"] = detect_content(result)
+    result["authentication"] = parse_authentication(result["headers"])
     print(json.dumps(result, indent=2))
     if args.json_path:
         Path(args.json_path).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
