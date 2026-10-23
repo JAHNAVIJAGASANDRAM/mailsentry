@@ -41,6 +41,13 @@ EXPLANATIONS = {
     "dmarc_fail": "The message reports a failed DMARC authentication result.",
     "spf_fail": "The message reports a failed SPF authentication result.",
 }
+RULE_LABELS = {
+    "reply_to_mismatch": "Reply-To mismatch",
+    "raw_ip_url": "URL uses a raw IP address",
+    "risky_attachment": "Risky attachment type",
+    "dmarc_fail": "DMARC failure",
+    "spf_fail": "SPF failure",
+}
 
 
 def parse_eml(path: str | Path) -> dict[str, Any]:
@@ -150,33 +157,115 @@ def build_report(parsed: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def escape_markdown(value: str) -> str:
+    """Escape untrusted single-line text before inserting it into Markdown."""
+    escaped: list[str] = []
+    for character in " ".join(str(value).split()):
+        if character in "\\`*_{}[]()#+-.!|>":
+            escaped.append("\\" + character)
+        elif character == "<":
+            escaped.append("&lt;")
+        elif character == "&":
+            escaped.append("&amp;")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
+
+
+def authentication_label(status: str) -> str:
+    if status == "unavailable":
+        return "Unavailable (no result present; not counted as a failure)"
+    if status == "fail":
+        return "FAILED"
+    if status == "pass":
+        return "Passed"
+    return f"Result: {status}"
+
+
+def render_markdown_report(report: dict[str, Any], email_filename: str) -> str:
+    """Render a privacy-safe human-readable Markdown analyst report."""
+    lines = [
+        "# MailSentry Analysis Report",
+        "",
+        f"**Email file:** {escape_markdown(email_filename)}",
+        f"**Risk level:** {escape_markdown(report['risk_level'])}",
+        f"**Score:** {report['score']} points",
+        "",
+        "> This score is a heuristic based on detected rules. It is not a probability of compromise or proof that a message is malicious.",
+        "",
+        "## Authentication",
+        "",
+    ]
+    for method, status in report["authentication"].items():
+        lines.append(f"- **{method.upper()}:** {escape_markdown(authentication_label(status))}")
+
+    lines.extend(["", "## Findings", ""])
+    if report["findings"]:
+        for index, finding in enumerate(report["findings"], start=1):
+            label = RULE_LABELS.get(finding["rule"], finding["rule"].replace("_", " ").title())
+            lines.extend([
+                f"{index}. **{escape_markdown(label)}** (+{finding['points']} points)",
+                f"   - Why: {escape_markdown(finding['explanation'])}",
+            ])
+    else:
+        lines.append("No indicators from the configured rules were found.")
+
+    lines.extend(["", "## Recommended actions", ""])
+    if report["recommendations"]:
+        lines.extend(f"{index}. {escape_markdown(action)}" for index, action in enumerate(report["recommendations"], 1))
+    else:
+        lines.append("No rule-specific actions are recommended.")
+    return "\n".join(lines) + "\n"
+
+
+def write_output(path: str, content: str, description: str, parser: argparse.ArgumentParser) -> None:
+    output_path = Path(path)
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(content, encoding="utf-8")
+    except (OSError, ValueError) as error:
+        parser.exit(2, f"MailSentry: cannot write {description}: {error}\n")
+
+
+def print_terminal_report(report: dict[str, Any], email_filename: str) -> None:
+    print("=" * 60)
+    print("MailSentry Analysis Report")
+    print(f"Email file: {email_filename}")
+    print(f"Risk level: {report['risk_level']} ({report['score']} points)")
+    print("Note: This is a heuristic score, not a probability of compromise.")
+    print("\nAuthentication:")
+    for method, status in report["authentication"].items():
+        print(f"  {method.upper()}: {authentication_label(status)}")
+    print("\nFindings:")
+    if report["findings"]:
+        for index, finding in enumerate(report["findings"], start=1):
+            label = RULE_LABELS.get(finding["rule"], finding["rule"].replace("_", " ").title())
+            print(f"  {index}. {label} (+{finding['points']} points)")
+            print(f"     Why: {finding['explanation']}")
+    else:
+        print("  No indicators from the configured rules were found.")
+    print("\nRecommended actions:")
+    if report["recommendations"]:
+        for index, action in enumerate(report["recommendations"], start=1):
+            print(f"  {index}. {action}")
+    else:
+        print("  No rule-specific actions are recommended.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze an email message offline.")
     parser.add_argument("eml", help="Path to a .eml file")
     parser.add_argument("--json", dest="json_path", help="Write findings and risk summary to this JSON file")
+    parser.add_argument("--report", dest="report_path", help="Write a human-readable Markdown report")
     args = parser.parse_args()
     parsed = parse_eml(args.eml)
     result = build_report(parsed)
-    print(f"MailSentry report: {parsed['source']}")
-    print(f"Risk: {result['risk_level']} ({result['score']} points)")
-    print("Authentication: " + ", ".join(f"{key.upper()} {value}" for key, value in result["authentication"].items()))
-    if result["findings"]:
-        print("Findings:")
-        for finding in result["findings"]:
-            print(f"  - {finding['rule']} (+{finding['points']}): {finding['explanation']}")
-    else:
-        print("Findings: none")
-    if result["recommendations"]:
-        print("Recommendations:")
-        for recommendation in result["recommendations"]:
-            print(f"  - {recommendation}")
+    print_terminal_report(result, parsed["source"])
     if args.json_path:
-        report_path = Path(args.json_path)
-        try:
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        except (OSError, ValueError) as error:
-            parser.exit(2, f"MailSentry: cannot write JSON report: {error}\n")
+        write_output(args.json_path, json.dumps(result, indent=2) + "\n", "JSON report", parser)
+    if args.report_path:
+        markdown = render_markdown_report(result, parsed["source"])
+        write_output(args.report_path, markdown, "Markdown report", parser)
 
 
 if __name__ == "__main__":

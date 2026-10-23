@@ -1,14 +1,26 @@
 # MailSentry
 
-MailSentry is a minimal, offline `.eml` analyzer for Python 3.10+. It uses only the standard library and reads plain-text bodies, falling back to HTML when no plain-text part exists. It does not make network requests, open URLs, or execute attachments.
+MailSentry is a minimal, offline `.eml` analyzer for Python 3.10+. It uses only the standard library and reads plain-text bodies, falling back to HTML when no plain-text part exists. You must provide an `.eml` file; live inbox integration is not implemented. MailSentry does not make network requests, open URLs, or execute attachments.
 
-```console
-python mailsentry.py samples/benign.eml
-python mailsentry.py samples/suspicious.eml --json findings.json
+In Windows PowerShell, run a sample:
+
+```powershell
+python .\mailsentry.py .\samples\suspicious.eml
+```
+
+Generate both privacy-safe JSON and a readable Markdown report in one run:
+
+```powershell
+python .\mailsentry.py .\samples\suspicious.eml --json .\reports\suspicious-report.json --report .\reports\suspicious-report.md
+```
+
+Run the tests:
+
+```powershell
 python -m unittest discover -s tests
 ```
 
-The terminal report explains each finding. JSON includes rule explanations, authentication results, score, risk level, and recommendations; it omits the source filename, message body, headers, and raw finding evidence such as addresses, URLs, and attachment names.
+The terminal and Markdown reports explain each finding and recommended actions. The score is a heuristic, not a probability of compromise. Missing authentication results are shown as unavailable, not failed. Both report formats omit the message body, headers, and raw finding evidence such as addresses, URLs, and attachment names; the Markdown report includes only the input filename. JSON includes rule explanations, authentication results, score, risk level, and recommendations.
 
 ## Rules and scoring
 

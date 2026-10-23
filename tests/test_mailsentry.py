@@ -5,7 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mailsentry import build_report, extract_urls, parse_authentication, parse_eml, score_findings
+from mailsentry import (
+    build_report,
+    extract_urls,
+    parse_authentication,
+    parse_eml,
+    render_markdown_report,
+    score_findings,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +28,9 @@ class MailSentryTests(unittest.TestCase):
         })
         report = build_report(parsed)
         self.assertEqual((report["score"], report["risk_level"]), (0, "Low"))
+        markdown = render_markdown_report(report, parsed["source"])
+        self.assertIn("Unavailable", markdown)
+        self.assertIn("not counted as a failure", markdown)
 
     def test_suspicious_sample_finds_content_and_auth_rules(self):
         report = build_report(parse_eml(ROOT / "samples" / "suspicious.eml"))
@@ -73,8 +83,11 @@ class MailSentryTests(unittest.TestCase):
             path.write_bytes(message)
             report = build_report(parse_eml(path))
         encoded = json.dumps(report)
+        markdown = render_markdown_report(report, "mail_[analyst]*.eml")
         for secret in ("secret@example.com", "private-token", "private-name.exe"):
             self.assertNotIn(secret, encoded)
+            self.assertNotIn(secret, markdown)
+        self.assertIn(r"mail\_\[analyst\]\*\.eml", markdown)
         self.assertTrue({"source", "headers", "body"}.isdisjoint(report))
         self.assertTrue(all(item["explanation"] for item in report["findings"]))
 
@@ -112,6 +125,27 @@ class MailSentryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("cannot write JSON report", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
+
+    def test_cli_exports_json_and_markdown_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            json_path = Path(directory) / "json" / "suspicious.json"
+            markdown_path = Path(directory) / "markdown" / "suspicious.md"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "mailsentry.py"), str(ROOT / "samples" / "suspicious.eml"),
+                 "--json", str(json_path), "--report", str(markdown_path)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            markdown = markdown_path.read_text(encoding="utf-8")
+        self.assertEqual(data["risk_level"], "High")
+        self.assertIn("Authentication", markdown)
+        self.assertIn("Findings", markdown)
+        self.assertIn("Recommended actions", markdown)
+        self.assertIn("+3 points", markdown)
+        self.assertNotIn("invoice.exe", markdown)
+        self.assertNotIn("192.0.2.45", markdown)
+        self.assertNotIn("payroll@example.org", markdown)
 
 
 if __name__ == "__main__":
