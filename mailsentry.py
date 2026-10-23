@@ -34,6 +34,13 @@ RECOMMENDATIONS = {
     "dmarc_fail": "Treat the sender domain as unauthenticated and verify the message independently.",
     "spf_fail": "Treat the sending server as unverified and verify the message independently.",
 }
+EXPLANATIONS = {
+    "reply_to_mismatch": "The Reply-To address differs from the sender address.",
+    "raw_ip_url": "A message URL uses an IP address instead of a domain name.",
+    "risky_attachment": "An attachment uses a file extension commonly used for executable content.",
+    "dmarc_fail": "The message reports a failed DMARC authentication result.",
+    "spf_fail": "The message reports a failed SPF authentication result.",
+}
 
 
 def parse_eml(path: str | Path) -> dict[str, Any]:
@@ -42,7 +49,8 @@ def parse_eml(path: str | Path) -> dict[str, Any]:
     with source.open("rb") as message_file:
         message = BytesParser(policy=policy.default).parse(message_file)
 
-    bodies: list[str] = []
+    plain_bodies: list[str] = []
+    html_bodies: list[str] = []
     attachments: list[str] = []
     for part in message.walk():
         if part.is_multipart():
@@ -50,13 +58,13 @@ def parse_eml(path: str | Path) -> dict[str, Any]:
         filename = part.get_filename()
         if filename:
             attachments.append(filename)
-        elif part.get_content_type() == "text/plain":
+        elif part.get_content_type() in {"text/plain", "text/html"}:
             try:
                 content = part.get_content()
             except (LookupError, UnicodeDecodeError):
                 content = ""
             if isinstance(content, str):
-                bodies.append(content)
+                (plain_bodies if part.get_content_type() == "text/plain" else html_bodies).append(content)
 
     headers: dict[str, str] = {}
     for name, value in message.items():
@@ -65,7 +73,7 @@ def parse_eml(path: str | Path) -> dict[str, Any]:
     return {
         "source": source.name,
         "headers": headers,
-        "body": "\n".join(bodies),
+        "body": "\n".join(plain_bodies or html_bodies),
         "attachments": attachments,
     }
 
@@ -79,9 +87,12 @@ def detect_content(parsed: dict[str, Any]) -> list[dict[str, str]]:
     if from_addresses and reply_addresses and not set(from_addresses).intersection(reply_addresses):
         findings.append({"rule": "reply_to_mismatch", "evidence": ", ".join(reply_addresses)})
 
-    for url in URL_PATTERN.findall(parsed["body"]):
+    for url in extract_urls(parsed["body"]):
         candidate = url if "://" in url else "http://" + url
-        host = (urlsplit(candidate).hostname or "").rstrip(".")
+        try:
+            host = (urlsplit(candidate).hostname or "").rstrip(".")
+        except ValueError:
+            continue
         try:
             ipaddress.ip_address(host)
         except ValueError:
@@ -93,6 +104,11 @@ def detect_content(parsed: dict[str, Any]) -> list[dict[str, str]]:
     if risky:
         findings.append({"rule": "risky_attachment", "evidence": ", ".join(risky)})
     return findings
+
+
+def extract_urls(body: str) -> list[str]:
+    """Extract HTTP(S) and www-style links without requesting them."""
+    return [url.rstrip(".,!?;:)]}") for url in URL_PATTERN.findall(body)]
 
 
 def parse_authentication(headers: dict[str, str]) -> dict[str, str]:
@@ -122,8 +138,11 @@ def build_report(parsed: dict[str, Any]) -> dict[str, Any]:
         findings.append({"rule": "spf_fail", "evidence": "SPF result: fail"})
     score, risk, recommendations = score_findings(findings)
     return {
-        "source": parsed["source"],
-        "findings": [dict(finding, points=RULE_POINTS[finding["rule"]]) for finding in findings],
+        "findings": [
+            {"rule": finding["rule"], "explanation": EXPLANATIONS[finding["rule"]],
+             "points": RULE_POINTS[finding["rule"]]}
+            for finding in findings
+        ],
         "authentication": authentication,
         "score": score,
         "risk_level": risk,
@@ -136,14 +155,15 @@ def main() -> None:
     parser.add_argument("eml", help="Path to a .eml file")
     parser.add_argument("--json", dest="json_path", help="Write findings and risk summary to this JSON file")
     args = parser.parse_args()
-    result = build_report(parse_eml(args.eml))
-    print(f"MailSentry report: {result['source']}")
+    parsed = parse_eml(args.eml)
+    result = build_report(parsed)
+    print(f"MailSentry report: {parsed['source']}")
     print(f"Risk: {result['risk_level']} ({result['score']} points)")
     print("Authentication: " + ", ".join(f"{key.upper()} {value}" for key, value in result["authentication"].items()))
     if result["findings"]:
         print("Findings:")
         for finding in result["findings"]:
-            print(f"  - {finding['rule']} (+{finding['points']}): {finding['evidence']}")
+            print(f"  - {finding['rule']} (+{finding['points']}): {finding['explanation']}")
     else:
         print("Findings: none")
     if result["recommendations"]:

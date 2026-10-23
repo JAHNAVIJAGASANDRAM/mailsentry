@@ -1,6 +1,6 @@
 # MailSentry
 
-MailSentry is a minimal, offline `.eml` analyzer for Python 3.10+. It uses only the standard library. It does not make network requests, open URLs, or execute attachments.
+MailSentry is a minimal, offline `.eml` analyzer for Python 3.10+. It uses only the standard library and reads plain-text bodies, falling back to HTML when no plain-text part exists. It does not make network requests, open URLs, or execute attachments.
 
 ```console
 python mailsentry.py samples/benign.eml
@@ -8,7 +8,7 @@ python mailsentry.py samples/suspicious.eml --json findings.json
 python -m unittest discover -s tests
 ```
 
-The terminal report explains each finding. JSON includes the source filename, findings and evidence, authentication results, score, risk level, and recommendations; it omits the message body and other headers.
+The terminal report explains each finding. JSON includes rule explanations, authentication results, score, risk level, and recommendations; it omits the source filename, message body, headers, and raw finding evidence such as addresses, URLs, and attachment names.
 
 ## Rules and scoring
 
