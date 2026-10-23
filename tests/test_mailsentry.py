@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,6 +87,31 @@ class MailSentryTests(unittest.TestCase):
         report = build_report(parsed)
         self.assertEqual((report["score"], report["risk_level"]), (0, "Low"))
         self.assertTrue(all(value == "unavailable" for value in report["authentication"].values()))
+
+    def test_cli_creates_missing_report_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "reports" / "benign-report.json"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "mailsentry.py"), str(ROOT / "samples" / "benign.eml"),
+                 "--json", str(output)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["risk_level"], "Low")
+
+    def test_cli_reports_invalid_output_path_without_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocker = Path(directory) / "file"
+            blocker.write_text("not a directory", encoding="utf-8")
+            output = blocker / "report.json"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "mailsentry.py"), str(ROOT / "samples" / "benign.eml"),
+                 "--json", str(output)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("cannot write JSON report", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

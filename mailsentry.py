@@ -171,7 +171,12 @@ def main() -> None:
         for recommendation in result["recommendations"]:
             print(f"  - {recommendation}")
     if args.json_path:
-        Path(args.json_path).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        report_path = Path(args.json_path)
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        except (OSError, ValueError) as error:
+            parser.exit(2, f"MailSentry: cannot write JSON report: {error}\n")
 
 
 if __name__ == "__main__":
