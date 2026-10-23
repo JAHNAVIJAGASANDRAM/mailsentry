@@ -35,8 +35,17 @@ Each rule contributes at most once per message:
 | Risky attachment extension (`.bat`, `.cmd`, `.com`, `.exe`, `.iso`, `.jar`, `.js`, `.jse`, `.lnk`, `.msi`, `.ps1`, `.scr`, `.vbe`, `.vbs`) | +3 |
 | Independently verified DMARC result is `FAIL` | +2 |
 | Independently verified SPF result is `FAIL` | +1 |
+| Urgency or scarcity wording | +1 |
+| Fee-based internship/training promotion with application solicitation | +1 |
+| Repeated application or registration calls to action | +1 |
+| Same HTTP(S) URL repeated | +1 |
+| Placement-support or third-party certification claim that cannot be verified from message text | +1 |
 
 Risk bands are Low (0–1), Medium (2–3), and High (4+). DKIM is reported but does not add points. Each rule is counted once. Reported header failures alone never contribute points.
+
+The content rules are separate promotional-spam indicators, not technical proof of phishing or fraud. A single paid course advertisement can receive only the fee-based promotion point and remain Low risk. Pressure language, repeated actions or links, fees, and unverifiable outcome claims can combine to increase a score. These rules cannot determine whether a message was actually solicited, whether fees are fair, or whether a credential/provider claim is true; verify those independently. Repeated URLs are detected textually without opening them. Weights are defined in `content_heuristics.py` and can be overridden through `build_report(content_weights=...)`.
+
+Malformed email structures and a missing or invalid `From` header produce explicit parsing warnings. MailSentry never invents a sender identity; SPF and DMARC remain unavailable/not evaluated when required data is missing.
 
 ## Optional Gmail worker
 
@@ -109,3 +118,5 @@ Run the full standard-library test suite (all DNS and library outcomes are mocke
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+The suite includes a supplied sample regression, synthetic legitimate paid-training and promotional examples, malformed-header handling, and duplicate-link checks.

@@ -13,6 +13,7 @@ from mailsentry import (
     extract_urls,
     parse_authentication,
     parse_eml,
+    parse_eml_bytes,
     render_markdown_report,
     score_findings,
 )
@@ -42,6 +43,53 @@ class MailSentryTests(unittest.TestCase):
         self.assertEqual(report["authentication"], {"spf": "fail", "dkim": "pass", "dmarc": "fail"})
         self.assertTrue(all(item["status"] == "NOT_EVALUATED" for item in report["verification"].values()))
         self.assertEqual((report["score"], report["risk_level"]), (7, "High"))
+
+    def test_supplied_test_sample_gets_explainable_promotional_findings(self):
+        report = build_report(parse_eml(ROOT / "samples" / "test.eml"))
+        rules = {finding["rule"] for finding in report["findings"]}
+        self.assertTrue({
+            "urgency_scarcity", "fee_based_program_promotion", "repeated_calls_to_action",
+            "duplicate_urls", "unverified_outcome_claims",
+        }.issubset(rules))
+        self.assertTrue(all(finding["category"] == "promotional_spam"
+                            for finding in report["findings"] if finding["rule"] in rules))
+        self.assertEqual(report["score"], 5)
+        self.assertEqual(report["risk_level"], "High")
+        self.assertTrue(all(finding["explanation"] for finding in report["findings"]))
+
+    def test_legitimate_paid_training_ad_is_not_called_phishing(self):
+        parsed = {
+            "source": "training.eml",
+            "headers": {"subject": "Optional paid Python training"},
+            "body": "Our optional evening course has a tuition fee. Review the syllabus and register if it suits you.",
+            "attachments": [],
+        }
+        report = build_report(parsed)
+        self.assertEqual([item["rule"] for item in report["findings"]], ["fee_based_program_promotion"])
+        self.assertEqual(report["findings"][0]["category"], "promotional_spam")
+        self.assertEqual((report["score"], report["risk_level"]), (1, "Low"))
+
+    def test_duplicate_urls_are_one_promotional_finding(self):
+        parsed = {
+            "headers": {"subject": "Course information"},
+            "body": "Details: https://courses.example/info. Again: https://courses.example/info!",
+            "attachments": [],
+        }
+        report = build_report(parsed)
+        self.assertEqual([item["rule"] for item in report["findings"]], ["duplicate_urls"])
+        self.assertEqual((report["score"], report["risk_level"]), (1, "Low"))
+
+    def test_incomplete_headers_warn_without_inventing_authentication(self):
+        malformed = parse_eml_bytes(b"From sender@example.org\nSubject: test\n\nA message body")
+        self.assertTrue(malformed["warnings"])
+        parsed = parse_eml_bytes(b"not a header\n\nA message body", "incomplete.eml")
+        self.assertTrue(any("From header" in warning for warning in parsed["warnings"]))
+        report = build_report(parsed, verify_auth=True, raw_message=b"not a header\n\nA message body")
+        self.assertTrue(any("From header" in warning for warning in report["warnings"]))
+        self.assertEqual(report["verification"]["spf"]["status"], "NOT_EVALUATED")
+        self.assertEqual(report["verification"]["dmarc"]["status"], "NOT_EVALUATED")
+        self.assertNotIn("spf_fail", {finding["rule"] for finding in report["findings"]})
+        self.assertNotIn("dmarc_fail", {finding["rule"] for finding in report["findings"]})
 
     def test_independent_authentication_failures_are_scored_once(self):
         parsed = parse_eml(ROOT / "samples" / "suspicious.eml")

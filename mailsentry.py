@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from auth_verification import SMTPAuthContext, verify_message_authentication
+from content_heuristics import CONTENT_RULES, CONTENT_RULE_POINTS, analyze_content
 
 
 RISKY_EXTENSIONS = {
@@ -28,6 +29,7 @@ RULE_POINTS = {
     "risky_attachment": 3,
     "dmarc_fail": 2,
     "spf_fail": 1,
+    **CONTENT_RULE_POINTS,
 }
 RECOMMENDATIONS = {
     "reply_to_mismatch": "Verify the sender using a known contact method before replying.",
@@ -35,6 +37,7 @@ RECOMMENDATIONS = {
     "risky_attachment": "Do not open the attachment; confirm it with the sender through a trusted channel.",
     "dmarc_fail": "Treat the sender domain as unauthenticated and verify the message independently.",
     "spf_fail": "Treat the sending server as unverified and verify the message independently.",
+    **{rule: details["recommendation"] for rule, details in CONTENT_RULES.items()},
 }
 EXPLANATIONS = {
     "reply_to_mismatch": "The Reply-To address differs from the sender address.",
@@ -42,6 +45,7 @@ EXPLANATIONS = {
     "risky_attachment": "An attachment uses a file extension commonly used for executable content.",
     "dmarc_fail": "Independent DMARC evaluation found no aligned SPF or DKIM pass under the sender domain's policy.",
     "spf_fail": "Independent SPF evaluation found that the trusted SMTP client was not authorized by the envelope sender's policy.",
+    **{rule: details["explanation"] for rule, details in CONTENT_RULES.items()},
 }
 RULE_LABELS = {
     "reply_to_mismatch": "Reply-To mismatch",
@@ -49,6 +53,7 @@ RULE_LABELS = {
     "risky_attachment": "Risky attachment type",
     "dmarc_fail": "DMARC failure",
     "spf_fail": "SPF failure",
+    **{rule: details["label"] for rule, details in CONTENT_RULES.items()},
 }
 
 
@@ -84,11 +89,24 @@ def parse_eml_bytes(data: bytes, source: str = "message.eml") -> dict[str, Any]:
     for name, value in message.items():
         key = name.lower()
         headers[key] = f"{headers[key]}\n{value}" if key in headers else str(value)
+    warnings: list[str] = []
+    for defect in message.defects:
+        if type(defect).__name__ == "MissingHeaderBodySeparatorDefect":
+            warnings.append("Missing header/body separator; message headers may be incomplete.")
+        else:
+            warnings.append(f"Malformed email structure detected ({type(defect).__name__}).")
+    for _name, value in message.items():
+        for defect in getattr(value, "defects", ()):
+            warnings.append(f"Malformed email header detected ({type(defect).__name__}).")
+    from_addresses = [address for _, address in getaddresses([headers.get("from", "")]) if "@" in address]
+    if not from_addresses:
+        warnings.append("Missing or invalid From header; sender identity is unavailable.")
     return {
         "source": source,
         "headers": headers,
         "body": "\n".join(plain_bodies or html_bodies),
         "attachments": attachments,
+        "warnings": list(dict.fromkeys(warnings)),
     }
 
 
@@ -134,10 +152,13 @@ def parse_authentication(headers: dict[str, str]) -> dict[str, str]:
     return results
 
 
-def score_findings(findings: list[dict[str, str]]) -> tuple[int, str, list[str]]:
+def score_findings(
+    findings: list[dict[str, Any]], rule_points: dict[str, int] | None = None,
+) -> tuple[int, str, list[str]]:
     """Score each rule once and return its total, risk band, and actions."""
-    rules = {finding["rule"] for finding in findings if finding["rule"] in RULE_POINTS}
-    score = sum(RULE_POINTS[rule] for rule in rules)
+    points = rule_points or RULE_POINTS
+    rules = {finding["rule"] for finding in findings if finding["rule"] in points}
+    score = sum(points[rule] for rule in rules)
     risk = "Low" if score <= 1 else "Medium" if score <= 3 else "High"
     recommendations = [RECOMMENDATIONS[rule] for rule in RULE_POINTS if rule in rules]
     return score, risk, recommendations
@@ -149,8 +170,12 @@ def build_report(
     verify_auth: bool = False,
     raw_message: bytes | None = None,
     smtp_context: SMTPAuthContext | None = None,
+    content_weights: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     findings = detect_content(parsed)
+    subject = parsed["headers"].get("subject", "")
+    content_findings = analyze_content(subject, parsed.get("body", ""), weights=content_weights)
+    findings.extend(content_findings)
     authentication = parse_authentication(parsed["headers"])
     verification = (
         verify_message_authentication(parsed["headers"], raw_message, smtp_context)
@@ -163,13 +188,16 @@ def build_report(
         findings.append({"rule": "dmarc_fail", "evidence": "Independent DMARC result: fail"})
     if verification["spf"]["status"] == "FAIL":
         findings.append({"rule": "spf_fail", "evidence": "Independent SPF result: fail"})
-    score, risk, recommendations = score_findings(findings)
+    effective_points = {**RULE_POINTS, **(content_weights or {})}
+    score, risk, recommendations = score_findings(findings, effective_points)
     return {
         "findings": [
-            {"rule": finding["rule"], "explanation": EXPLANATIONS[finding["rule"]],
-             "points": RULE_POINTS[finding["rule"]]}
+            {"rule": finding["rule"], "category": finding.get("category", "technical"),
+             "explanation": EXPLANATIONS[finding["rule"]],
+             "points": effective_points[finding["rule"]]}
             for finding in findings
         ],
+        "warnings": parsed.get("warnings", []),
         "authentication": authentication,
         "verification": verification,
         "score": score,
@@ -232,6 +260,12 @@ def render_markdown_report(report: dict[str, Any], email_filename: str) -> str:
     for method, result in report["verification"].items():
         lines.append(f"- **{method.upper()}:** {escape_markdown(verification_label(result))}")
 
+    lines.extend(["", "## Parsing warnings", ""])
+    if report.get("warnings"):
+        lines.extend(f"- {escape_markdown(warning)}" for warning in report["warnings"])
+    else:
+        lines.append("No parsing warnings.")
+
     lines.extend(["", "## Findings", ""])
     if report["findings"]:
         for index, finding in enumerate(report["findings"], start=1):
@@ -272,6 +306,10 @@ def print_terminal_report(report: dict[str, Any], email_filename: str) -> None:
     print("\nIndependent verification:")
     for method, result in report["verification"].items():
         print(f"  {method.upper()}: {verification_label(result)}")
+    if report.get("warnings"):
+        print("\nParsing warnings:")
+        for warning in report["warnings"]:
+            print(f"  - {warning}")
     print("\nFindings:")
     if report["findings"]:
         for index, finding in enumerate(report["findings"], start=1):
