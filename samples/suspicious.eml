@@ -1,0 +1,18 @@
+From: Finance Team <payroll@example.org>
+Reply-To: account-update@external.example
+To: Employee <employee@example.net>
+Subject: Urgent payroll review
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mail-sentry-boundary"
+
+--mail-sentry-boundary
+Content-Type: text/plain; charset="utf-8"
+
+Review your payroll immediately at http://192.0.2.45/login
+--mail-sentry-boundary
+Content-Type: application/octet-stream; name="invoice.exe"
+Content-Disposition: attachment; filename="invoice.exe"
+Content-Transfer-Encoding: base64
+
+SGVsbG8=
+--mail-sentry-boundary--

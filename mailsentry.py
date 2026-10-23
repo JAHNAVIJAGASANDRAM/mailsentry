@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import re
 from email import policy
 from email.parser import BytesParser
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+
+RISKY_EXTENSIONS = {
+    ".bat", ".cmd", ".com", ".exe", ".iso", ".jar", ".js", ".jse",
+    ".lnk", ".msi", ".ps1", ".scr", ".vbe", ".vbs",
+}
+URL_PATTERN = re.compile(r"\b(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
 
 
 def parse_eml(path: str | Path) -> dict[str, Any]:
@@ -40,12 +51,38 @@ def parse_eml(path: str | Path) -> dict[str, Any]:
     }
 
 
+def detect_content(parsed: dict[str, Any]) -> list[dict[str, str]]:
+    """Find reply-address mismatches, IP-literal URLs, and risky filenames."""
+    findings: list[dict[str, str]] = []
+    headers = parsed["headers"]
+    from_addresses = [address.lower() for _, address in getaddresses([headers.get("from", "")]) if address]
+    reply_addresses = [address.lower() for _, address in getaddresses([headers.get("reply-to", "")]) if address]
+    if from_addresses and reply_addresses and not set(from_addresses).intersection(reply_addresses):
+        findings.append({"rule": "reply_to_mismatch", "evidence": ", ".join(reply_addresses)})
+
+    for url in URL_PATTERN.findall(parsed["body"]):
+        candidate = url if "://" in url else "http://" + url
+        host = (urlsplit(candidate).hostname or "").rstrip(".")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            continue
+        findings.append({"rule": "raw_ip_url", "evidence": url})
+        break
+
+    risky = [name for name in parsed["attachments"] if Path(name).suffix.lower() in RISKY_EXTENSIONS]
+    if risky:
+        findings.append({"rule": "risky_attachment", "evidence": ", ".join(risky)})
+    return findings
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze an email message offline.")
     parser.add_argument("eml", help="Path to a .eml file")
     parser.add_argument("--json", dest="json_path", help="Write parsed data as JSON")
     args = parser.parse_args()
     result = parse_eml(args.eml)
+    result["findings"] = detect_content(result)
     print(json.dumps(result, indent=2))
     if args.json_path:
         Path(args.json_path).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
