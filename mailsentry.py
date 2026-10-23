@@ -20,6 +20,20 @@ RISKY_EXTENSIONS = {
 }
 URL_PATTERN = re.compile(r"\b(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
 AUTH_RESULT_PATTERN = re.compile(r"(?:^|;)\s*(spf|dkim|dmarc)\s*=\s*([a-z]+)", re.IGNORECASE)
+RULE_POINTS = {
+    "reply_to_mismatch": 2,
+    "raw_ip_url": 2,
+    "risky_attachment": 3,
+    "dmarc_fail": 2,
+    "spf_fail": 1,
+}
+RECOMMENDATIONS = {
+    "reply_to_mismatch": "Verify the sender using a known contact method before replying.",
+    "raw_ip_url": "Do not follow the URL; verify the destination through a trusted channel.",
+    "risky_attachment": "Do not open the attachment; confirm it with the sender through a trusted channel.",
+    "dmarc_fail": "Treat the sender domain as unauthenticated and verify the message independently.",
+    "spf_fail": "Treat the sending server as unverified and verify the message independently.",
+}
 
 
 def parse_eml(path: str | Path) -> dict[str, Any]:
@@ -86,15 +100,52 @@ def parse_authentication(headers: dict[str, str]) -> dict[str, str]:
     return results
 
 
+def score_findings(findings: list[dict[str, str]]) -> tuple[int, str, list[str]]:
+    """Score each rule once and return its total, risk band, and actions."""
+    rules = {finding["rule"] for finding in findings if finding["rule"] in RULE_POINTS}
+    score = sum(RULE_POINTS[rule] for rule in rules)
+    risk = "Low" if score <= 1 else "Medium" if score <= 3 else "High"
+    recommendations = [RECOMMENDATIONS[rule] for rule in RULE_POINTS if rule in rules]
+    return score, risk, recommendations
+
+
+def build_report(parsed: dict[str, Any]) -> dict[str, Any]:
+    findings = detect_content(parsed)
+    authentication = parse_authentication(parsed["headers"])
+    if authentication["dmarc"] == "fail":
+        findings.append({"rule": "dmarc_fail", "evidence": "DMARC result: fail"})
+    if authentication["spf"] == "fail":
+        findings.append({"rule": "spf_fail", "evidence": "SPF result: fail"})
+    score, risk, recommendations = score_findings(findings)
+    return {
+        "source": parsed["source"],
+        "findings": [dict(finding, points=RULE_POINTS[finding["rule"]]) for finding in findings],
+        "authentication": authentication,
+        "score": score,
+        "risk_level": risk,
+        "recommendations": recommendations,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze an email message offline.")
     parser.add_argument("eml", help="Path to a .eml file")
-    parser.add_argument("--json", dest="json_path", help="Write parsed data as JSON")
+    parser.add_argument("--json", dest="json_path", help="Write findings and risk summary to this JSON file")
     args = parser.parse_args()
-    result = parse_eml(args.eml)
-    result["findings"] = detect_content(result)
-    result["authentication"] = parse_authentication(result["headers"])
-    print(json.dumps(result, indent=2))
+    result = build_report(parse_eml(args.eml))
+    print(f"MailSentry report: {result['source']}")
+    print(f"Risk: {result['risk_level']} ({result['score']} points)")
+    print("Authentication: " + ", ".join(f"{key.upper()} {value}" for key, value in result["authentication"].items()))
+    if result["findings"]:
+        print("Findings:")
+        for finding in result["findings"]:
+            print(f"  - {finding['rule']} (+{finding['points']}): {finding['evidence']}")
+    else:
+        print("Findings: none")
+    if result["recommendations"]:
+        print("Recommendations:")
+        for recommendation in result["recommendations"]:
+            print(f"  - {recommendation}")
     if args.json_path:
         Path(args.json_path).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
