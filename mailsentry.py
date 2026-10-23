@@ -58,9 +58,13 @@ def parse_eml(path: str | Path) -> dict[str, Any]:
             if isinstance(content, str):
                 bodies.append(content)
 
+    headers: dict[str, str] = {}
+    for name, value in message.items():
+        key = name.lower()
+        headers[key] = f"{headers[key]}\n{value}" if key in headers else str(value)
     return {
         "source": source.name,
-        "headers": {name.lower(): str(value) for name, value in message.items()},
+        "headers": headers,
         "body": "\n".join(bodies),
         "attachments": attachments,
     }
