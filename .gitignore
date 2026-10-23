@@ -1,4 +1,25 @@
+
+# Python cache
 __pycache__/
 *.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Google OAuth credentials
+credentials.json
+token.json
+
+# Local worker state and databases
+state/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Generated reports
 reports/*.json
 reports/**/*.json
+reports/*.md
+reports/**/*.md

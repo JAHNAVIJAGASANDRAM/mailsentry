@@ -54,7 +54,12 @@ def parse_eml(path: str | Path) -> dict[str, Any]:
     """Parse an RFC 5322 message without following links or opening attachments."""
     source = Path(path)
     with source.open("rb") as message_file:
-        message = BytesParser(policy=policy.default).parse(message_file)
+        return parse_eml_bytes(message_file.read(), source.name)
+
+
+def parse_eml_bytes(data: bytes, source: str = "message.eml") -> dict[str, Any]:
+    """Parse RFC 5322 message bytes (for offline files or fetched MIME data)."""
+    message = BytesParser(policy=policy.default).parsebytes(data)
 
     plain_bodies: list[str] = []
     html_bodies: list[str] = []
@@ -78,7 +83,7 @@ def parse_eml(path: str | Path) -> dict[str, Any]:
         key = name.lower()
         headers[key] = f"{headers[key]}\n{value}" if key in headers else str(value)
     return {
-        "source": source.name,
+        "source": source,
         "headers": headers,
         "body": "\n".join(plain_bodies or html_bodies),
         "attachments": attachments,

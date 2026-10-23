@@ -1,1 +1,6 @@
-# No third-party dependencies; MailSentry uses only the Python 3.10+ standard library.
+# The offline analyzer uses only the Python 3.10+ standard library.
+# These packages are used only by the opt-in Gmail worker.
+google-api-python-client>=2.0.0
+google-auth>=2.0.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.0.0
